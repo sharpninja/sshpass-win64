@@ -461,8 +461,14 @@ jobs:
 
           echo "wingetcreate update failed — using submodule PR approach..."
 
-          # Work in the submodule (credentials from checkout token)
+          # Configure git credentials for pushing to fork
+          gh auth setup-git
+
+          # Work in the submodule
           Set-Location packaging/forks/winget-pkgs
+
+          # Ensure origin uses the authenticated URL
+          git remote set-url origin "https://github.com/sharpninja/winget-pkgs.git"
 
           # Sync with upstream
           git remote add upstream https://github.com/microsoft/winget-pkgs.git 2>$null
