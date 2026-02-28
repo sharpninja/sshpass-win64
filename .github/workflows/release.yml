@@ -357,6 +357,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Sync fork with upstream
+        shell: bash
+        run: |
+          git remote add upstream https://github.com/microsoft/winget-pkgs.git || true
+          git fetch upstream master
+          git checkout master
+          git reset --hard upstream/master
+          git push origin master --force
+
       - name: Install wingetcreate
         shell: pwsh
         run: |
