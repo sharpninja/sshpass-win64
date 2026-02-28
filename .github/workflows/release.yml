@@ -1,0 +1,214 @@
+name: Build, Test & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+env:
+  MINGW_PATH: C:\mingw64\bin
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add MinGW to PATH
+        shell: cmd
+        run: echo %MINGW_PATH%>>%GITHUB_PATH%
+
+      - name: Build sshpass
+        shell: cmd
+        run: make -f Makefile.win
+
+      - name: Verify binary
+        shell: cmd
+        run: sshpass.exe -V
+
+      - name: Build unit tests
+        shell: cmd
+        run: |
+          gcc -Wall -O2 -D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006 -DTESTING -I tests -o tests\test_match.exe tests\test_match.c main_win.c -lkernel32
+          gcc -Wall -O2 -D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006 -DTESTING -I tests -o tests\test_build_cmdline.exe tests\test_build_cmdline.c main_win.c -lkernel32
+          gcc -Wall -O2 -D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006 -DTESTING -I tests -o tests\test_handleoutput.exe tests\test_handleoutput.c main_win.c -lkernel32
+
+      - name: Run unit tests
+        shell: cmd
+        run: |
+          tests\test_match.exe
+          tests\test_build_cmdline.exe
+          tests\test_handleoutput.exe
+
+      - name: Run integration tests
+        shell: cmd
+        run: tests\test_integration.cmd .
+
+      - name: Upload sshpass binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: sshpass-exe
+          path: sshpass.exe
+          retention-days: 5
+
+  package-and-release:
+    name: Package & Release
+    needs: build-and-test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download sshpass binary
+        uses: actions/download-artifact@v4
+        with:
+          name: sshpass-exe
+
+      - name: Extract version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+          echo "Version: $version"
+
+      - name: Create release zip
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $zipName = "sshpass-win64-$version.zip"
+
+          # Create staging directory
+          New-Item -ItemType Directory -Path staging -Force
+          Copy-Item sshpass.exe staging/
+          Copy-Item README.md staging/
+          Copy-Item COPYING staging/
+          Copy-Item sshpass.1 staging/
+
+          # Create zip
+          Compress-Archive -Path staging/* -DestinationPath $zipName
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+
+          # Compute SHA256
+          $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash
+          echo "ZIP_HASH=$hash" >> $env:GITHUB_ENV
+          echo "SHA256: $hash"
+
+          # Save hash to file for reference
+          "$hash" | Out-File -FilePath "sha256.txt" -NoNewline
+
+      - name: Build Chocolatey package
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $hash = $env:ZIP_HASH
+
+          # Update nuspec version
+          $nuspecPath = "packaging/chocolatey/sshpass-win64.nuspec"
+          (Get-Content $nuspecPath) -replace '\$VERSION\$', $version | Set-Content $nuspecPath
+
+          # Update install script checksum
+          $installPath = "packaging/chocolatey/tools/chocolateyinstall.ps1"
+          (Get-Content $installPath) -replace '\$CHECKSUM\$', $hash | Set-Content $installPath
+
+          # Pack (if choco is available)
+          if (Get-Command choco -ErrorAction SilentlyContinue) {
+            Push-Location packaging/chocolatey
+            choco pack
+            Pop-Location
+            $nupkg = Get-ChildItem packaging/chocolatey/*.nupkg | Select-Object -First 1
+            if ($nupkg) {
+              Copy-Item $nupkg.FullName .
+              echo "NUPKG_NAME=$($nupkg.Name)" >> $env:GITHUB_ENV
+            }
+          } else {
+            echo "Chocolatey not available, skipping .nupkg creation"
+            # Create a zip of the chocolatey package files instead
+            Compress-Archive -Path packaging/chocolatey/* -DestinationPath "sshpass-win64-$version-chocolatey.zip"
+            echo "NUPKG_NAME=sshpass-win64-$version-chocolatey.zip" >> $env:GITHUB_ENV
+          }
+
+      - name: Update Scoop manifest
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $hash = $env:ZIP_HASH
+
+          $manifest = Get-Content packaging/scoop/sshpass.json | ConvertFrom-Json
+          $manifest.version = $version
+          $manifest.architecture.'64bit'.url = "https://github.com/sharpninja/sshpass-win64/releases/download/v$version/sshpass-win64-$version.zip"
+          $manifest.architecture.'64bit'.hash = $hash
+          $manifest | ConvertTo-Json -Depth 10 | Set-Content packaging/scoop/sshpass.json
+
+          # Also copy to release artifacts
+          Copy-Item packaging/scoop/sshpass.json sshpass-scoop-manifest.json
+
+      - name: Update winget manifests
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $hash = $env:ZIP_HASH
+
+          # Update version manifest
+          $versionYaml = "packaging/winget/SharpNinja.sshpass.yaml"
+          (Get-Content $versionYaml) -replace '1\.10\.0', $version | Set-Content $versionYaml
+
+          # Update locale manifest
+          $localeYaml = "packaging/winget/SharpNinja.sshpass.locale.en-US.yaml"
+          (Get-Content $localeYaml) -replace '1\.10\.0', $version | Set-Content $localeYaml
+
+          # Update installer manifest
+          $installerYaml = "packaging/winget/SharpNinja.sshpass.installer.yaml"
+          (Get-Content $installerYaml) -replace '1\.10\.0', $version | Set-Content $installerYaml
+          (Get-Content $installerYaml) -replace 'PLACEHOLDER_HASH', $hash | Set-Content $installerYaml
+
+          # Create a zip of winget manifests
+          Compress-Archive -Path packaging/winget/* -DestinationPath "sshpass-winget-manifests-$version.zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: sshpass-win64 v${{ steps.version.outputs.VERSION }}
+          body: |
+            ## sshpass-win64 v${{ steps.version.outputs.VERSION }}
+
+            Native Windows 64-bit port of sshpass using the ConPTY API.
+
+            ### Downloads
+            - **`sshpass-win64-${{ steps.version.outputs.VERSION }}.zip`** — Standalone binary (just extract and use)
+            - **`sshpass-scoop-manifest.json`** — Scoop manifest for bucket integration
+            - **`sshpass-winget-manifests-${{ steps.version.outputs.VERSION }}.zip`** — Winget manifest files
+
+            ### Install via Scoop
+            ```powershell
+            scoop bucket add sshpass https://github.com/sharpninja/sshpass-win64
+            scoop install sshpass
+            ```
+
+            ### Install via Chocolatey
+            ```powershell
+            choco install sshpass-win64
+            ```
+
+            ### Requirements
+            - Windows 10 version 1809 or later
+
+            ### SHA256
+            `${{ env.ZIP_HASH }}`
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            sshpass-win64-${{ steps.version.outputs.VERSION }}.zip
+            sshpass-scoop-manifest.json
+            sshpass-winget-manifests-${{ steps.version.outputs.VERSION }}.zip
+            ${{ env.NUPKG_NAME }}
+            sha256.txt

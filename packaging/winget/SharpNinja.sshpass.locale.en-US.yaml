@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+
+PackageIdentifier: SharpNinja.sshpass
+PackageVersion: 1.10.0
+PackageLocale: en-US
+Publisher: SharpNinja
+PublisherUrl: https://github.com/sharpninja
+PublisherSupportUrl: https://github.com/sharpninja/sshpass-win64/issues
+Author: Shachar Shemesh
+PackageName: sshpass
+PackageUrl: https://github.com/sharpninja/sshpass-win64
+License: GPL-2.0
+LicenseUrl: https://github.com/sharpninja/sshpass-win64/blob/main/COPYING
+Copyright: Copyright (C) 2006-2022 Lingnu Open Source Consulting Ltd. / Shachar Shemesh
+ShortDescription: Non-interactive SSH password authentication tool - native Win64 port
+Description: |-
+  sshpass is a utility designed for running SSH in non-interactive mode,
+  providing the password via the command line, environment variable, or file.
+  This is a native Windows 64-bit port using the Windows ConPTY (Pseudo Console) API.
+  No Cygwin or WSL required. Requires Windows 10 version 1809 or later.
+Tags:
+  - ssh
+  - sshpass
+  - password
+  - automation
+  - cli
+  - devops
+ReleaseNotesUrl: https://github.com/sharpninja/sshpass-win64/releases
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

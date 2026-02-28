@@ -36,9 +36,15 @@
 /* getopt support - MinGW provides this */
 #include <getopt.h>
 
+#ifndef PACKAGE_NAME
 #define PACKAGE_NAME "sshpass"
+#endif
+#ifndef PACKAGE_STRING
 #define PACKAGE_STRING "sshpass 1.10"
+#endif
+#ifndef PASSWORD_PROMPT
 #define PASSWORD_PROMPT "assword"
+#endif
 
 enum program_return_codes {
     RETURN_NOERROR,
@@ -52,6 +58,13 @@ enum program_return_codes {
     RETURN_HELP,
 };
 
+/* When TESTING is defined, make static functions visible and exclude main() */
+#ifdef TESTING
+#define STATIC
+#else
+#define STATIC static
+#endif
+
 /* Forward declarations */
 int runprogram(int argc, char *argv[]);
 int handleoutput(const char *buffer, int numread);
@@ -59,6 +72,9 @@ int match(const char *reference, const char *buffer, int bufsize, int state);
 void write_pass(HANDLE hWrite);
 void write_pass_fd(int srcfd, HANDLE hWrite);
 void reliable_write(HANDLE hWrite, const void *data, DWORD size);
+STATIC char *build_command_line(int argc, char *argv[]);
+STATIC int parse_options(int argc, char *argv[]);
+void handleoutput_reset(void);
 
 /* Global args structure */
 struct {
@@ -74,7 +90,7 @@ struct {
     char *orig_password;
 } args;
 
-static void hide_password()
+STATIC void hide_password()
 {
     assert(args.pwsrc.password == NULL);
 
@@ -89,7 +105,7 @@ static void hide_password()
     args.orig_password = NULL;
 }
 
-static void show_help()
+STATIC void show_help()
 {
     printf("Usage: " PACKAGE_NAME " [-f|-d|-p|-e[env_var]] [-hV] command parameters\n"
             "   -f filename   Take password to use from file.\n"
@@ -106,7 +122,7 @@ static void show_help()
 
 /* Parse the command line. Fill in the "args" global struct with the results. Return argv offset
    on success, and a negative number on failure */
-static int parse_options(int argc, char *argv[])
+STATIC int parse_options(int argc, char *argv[])
 {
     int error = -1;
     int opt;
@@ -185,6 +201,7 @@ static int parse_options(int argc, char *argv[])
         return optind;
 }
 
+#ifndef TESTING
 int main(int argc, char *argv[])
 {
     int opt_offset = parse_options(argc, argv);
@@ -210,12 +227,13 @@ int main(int argc, char *argv[])
 
     return runprogram(argc - opt_offset, argv + opt_offset);
 }
+#endif /* !TESTING */
 
 /*
  * Build a command line string from argv for CreateProcess.
  * Each argument is quoted if it contains spaces or special characters.
  */
-static char *build_command_line(int argc, char *argv[])
+STATIC char *build_command_line(int argc, char *argv[])
 {
     /* Calculate total length needed */
     size_t total = 0;
@@ -257,7 +275,7 @@ static PFN_CreatePseudoConsole pCreatePseudoConsole = NULL;
 static PFN_ClosePseudoConsole pClosePseudoConsole = NULL;
 static PFN_ResizePseudoConsole pResizePseudoConsole = NULL;
 
-static int load_conpty_api(void)
+STATIC int load_conpty_api(void)
 {
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
     if (!hKernel32) return 0;
@@ -272,7 +290,7 @@ static int load_conpty_api(void)
 /*
  * Initialize a STARTUPINFOEX with the pseudo console attribute
  */
-static BOOL setup_startup_info(STARTUPINFOEXA *psi, HPCON hPC)
+STATIC BOOL setup_startup_info(STARTUPINFOEXA *psi, HPCON hPC)
 {
     SIZE_T attrListSize = 0;
 
@@ -307,7 +325,7 @@ static BOOL setup_startup_info(STARTUPINFOEXA *psi, HPCON hPC)
     return TRUE;
 }
 
-static void cleanup_startup_info(STARTUPINFOEXA *psi)
+STATIC void cleanup_startup_info(STARTUPINFOEXA *psi)
 {
     if (psi->lpAttributeList) {
         DeleteProcThreadAttributeList(psi->lpAttributeList);
@@ -497,12 +515,24 @@ cleanup:
     return result;
 }
 
+/* Static state for handleoutput - file scope for reset access */
+static int ho_prevmatch = 0;
+static int ho_state1 = 0, ho_state2 = 0, ho_state3 = 0;
+static int ho_firsttime = 1;
+
+/* Reset handleoutput static state (for testing) */
+void handleoutput_reset(void)
+{
+    ho_prevmatch = 0;
+    ho_state1 = 0;
+    ho_state2 = 0;
+    ho_state3 = 0;
+    ho_firsttime = 1;
+}
+
 int handleoutput(const char *buffer, int numread)
 {
-    static int prevmatch = 0;
-    static int state1, state2, state3;
-    static int firsttime = 1;
-    static const char *compare1 = PASSWORD_PROMPT;
+    const char *compare1 = PASSWORD_PROMPT;
     static const char compare2[] = "The authenticity of host ";
     static const char compare3[] = "differs from the key for the IP address";
     int ret = 0;
@@ -511,21 +541,21 @@ int handleoutput(const char *buffer, int numread)
         compare1 = args.pwprompt;
     }
 
-    if (args.verbose && firsttime) {
-        firsttime = 0;
+    if (args.verbose && ho_firsttime) {
+        ho_firsttime = 0;
         fprintf(stderr, "SSHPASS: searching for password prompt using match \"%s\"\n", compare1);
     }
 
-    state1 = match(compare1, buffer, numread, state1);
+    ho_state1 = match(compare1, buffer, numread, ho_state1);
 
     /* Are we at a password prompt? */
-    if (compare1[state1] == '\0') {
-        if (!prevmatch) {
+    if (compare1[ho_state1] == '\0') {
+        if (!ho_prevmatch) {
             if (args.verbose)
                 fprintf(stderr, "SSHPASS: detected prompt. Sending password.\n");
             write_pass(INVALID_HANDLE_VALUE); /* Will use global pipe handle */
-            state1 = 0;
-            prevmatch = 1;
+            ho_state1 = 0;
+            ho_prevmatch = 1;
         } else {
             if (args.verbose)
                 fprintf(stderr, "SSHPASS: detected prompt, again. Wrong password. Terminating.\n");
@@ -534,15 +564,15 @@ int handleoutput(const char *buffer, int numread)
     }
 
     if (ret == 0) {
-        state2 = match(compare2, buffer, numread, state2);
+        ho_state2 = match(compare2, buffer, numread, ho_state2);
 
-        if (compare2[state2] == '\0') {
+        if (compare2[ho_state2] == '\0') {
             if (args.verbose)
                 fprintf(stderr, "SSHPASS: detected host authentication prompt. Exiting.\n");
             ret = RETURN_HOST_KEY_UNKNOWN;
         } else {
-            state3 = match(compare3, buffer, numread, state3);
-            if (compare3[state3] == '\0') {
+            ho_state3 = match(compare3, buffer, numread, ho_state3);
+            if (compare3[ho_state3] == '\0') {
                 ret = RETURN_HOST_KEY_CHANGED;
             }
         }

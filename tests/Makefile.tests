@@ -1,0 +1,72 @@
+# Makefile for sshpass tests
+# Usage:
+#   make -f tests/Makefile.tests unit          - build and run unit tests
+#   make -f tests/Makefile.tests integration   - run integration tests (batch script)
+#   make -f tests/Makefile.tests all           - run everything
+
+CC = gcc
+CFLAGS = -Wall -O2 -D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006
+CFLAGS_TEST = $(CFLAGS) -DTESTING -I tests
+LIBS = -lkernel32
+
+# Directories
+TESTDIR = tests
+
+# Source
+MAIN_SRC = main_win.c
+
+# Test binaries
+TEST_MATCH = $(TESTDIR)/test_match.exe
+TEST_CMDLINE = $(TESTDIR)/test_build_cmdline.exe
+TEST_HANDLEOUTPUT = $(TESTDIR)/test_handleoutput.exe
+
+# Main binary (needed for integration tests)
+SSHPASS = sshpass.exe
+
+UNIT_TESTS = $(TEST_MATCH) $(TEST_CMDLINE) $(TEST_HANDLEOUTPUT)
+
+.PHONY: all unit integration clean
+
+all: unit integration
+
+# --- Unit Tests ---
+
+unit: $(UNIT_TESTS)
+	@echo.
+	@echo ========================================
+	@echo Running unit tests...
+	@echo ========================================
+	@echo.
+	$(TEST_MATCH)
+	@echo.
+	$(TEST_CMDLINE)
+	@echo.
+	$(TEST_HANDLEOUTPUT)
+
+$(TEST_MATCH): $(TESTDIR)/test_match.c $(MAIN_SRC) $(TESTDIR)/test_framework.h
+	$(CC) $(CFLAGS_TEST) -o $@ $(TESTDIR)/test_match.c $(MAIN_SRC) $(LIBS)
+
+$(TEST_CMDLINE): $(TESTDIR)/test_build_cmdline.c $(MAIN_SRC) $(TESTDIR)/test_framework.h
+	$(CC) $(CFLAGS_TEST) -o $@ $(TESTDIR)/test_build_cmdline.c $(MAIN_SRC) $(LIBS)
+
+$(TEST_HANDLEOUTPUT): $(TESTDIR)/test_handleoutput.c $(MAIN_SRC) $(TESTDIR)/test_framework.h
+	$(CC) $(CFLAGS_TEST) -o $@ $(TESTDIR)/test_handleoutput.c $(MAIN_SRC) $(LIBS)
+
+# --- Integration Tests ---
+
+integration: $(SSHPASS)
+	@echo.
+	@echo ========================================
+	@echo Running integration tests...
+	@echo ========================================
+	@echo.
+	$(TESTDIR)/test_integration.cmd .
+
+$(SSHPASS):
+	$(CC) $(CFLAGS) -o $@ $(MAIN_SRC) $(LIBS)
+
+# --- Clean ---
+
+clean:
+	-del /Q $(TESTDIR)\*.exe $(TESTDIR)\*.o 2>nul
+	-del /Q test_password.tmp mock_debug.log 2>nul

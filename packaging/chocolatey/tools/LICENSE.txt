@@ -1,0 +1,6 @@
+From: https://github.com/sharpninja/sshpass-win64/blob/main/COPYING
+
+sshpass is licensed under the GNU General Public License v2 (GPLv2).
+
+See the full license text at:
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html

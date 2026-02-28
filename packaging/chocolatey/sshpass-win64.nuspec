@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>sshpass-win64</id>
+    <version>$VERSION$</version>
+    <title>sshpass (Win64 Native Port)</title>
+    <authors>Shachar Shemesh, Lingnu Open Source Consulting Ltd.</authors>
+    <owners>sharpninja</owners>
+    <projectUrl>https://github.com/sharpninja/sshpass-win64</projectUrl>
+    <licenseUrl>https://github.com/sharpninja/sshpass-win64/blob/main/COPYING</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/sharpninja/sshpass-win64</projectSourceUrl>
+    <bugTrackerUrl>https://github.com/sharpninja/sshpass-win64/issues</bugTrackerUrl>
+    <tags>ssh sshpass password automation devops cli</tags>
+    <summary>Non-interactive SSH password authentication tool - native Win64 port</summary>
+    <description>
+sshpass is a utility designed for running SSH in non-interactive mode, providing the password via the command line, environment variable, or file.
+
+This is a native Windows 64-bit port using the Windows ConPTY (Pseudo Console) API. No Cygwin or WSL required.
+
+## Features
+- Provide SSH password via command line (-p), file (-f), environment variable (-e), or stdin
+- Detects host key warnings and returns appropriate exit codes
+- Native Win64 binary - no Unix compatibility layer needed
+- Requires Windows 10 version 1809 or later
+
+## Usage
+```
+sshpass -p "password" ssh user@host
+sshpass -f password.txt ssh user@host
+sshpass -e ssh user@host
+```
+    </description>
+    <releaseNotes>https://github.com/sharpninja/sshpass-win64/releases</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

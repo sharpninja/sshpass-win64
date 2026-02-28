@@ -1,0 +1,14 @@
+VERIFICATION
+
+Verification is intended to assist the Chocolatey moderators and community
+in verifying that this package's contents are trustworthy.
+
+1. Download the official release from:
+   https://github.com/sharpninja/sshpass-win64/releases
+
+2. The package downloads sshpass-win64-<version>.zip from the GitHub release.
+
+3. You can verify the SHA256 checksum matches the one in chocolateyinstall.ps1.
+
+4. The source code is available at:
+   https://github.com/sharpninja/sshpass-win64

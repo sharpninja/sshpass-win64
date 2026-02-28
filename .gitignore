@@ -25,6 +25,12 @@ aclocal.m4
 .vscode/
 .idea/
 
+# Test artifacts
+tests/*.exe
+tests/*.o
+test_password.tmp
+mock_debug.log
+
 # OS files
 Thumbs.db
 Desktop.ini
