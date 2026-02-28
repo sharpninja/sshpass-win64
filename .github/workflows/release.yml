@@ -307,11 +307,10 @@ jobs:
             exit 0
           fi
 
-          # Configure git with credential helper that uses GH_TOKEN
+          # Configure git — use gh CLI as credential helper (avoids token masking issues)
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global credential.helper store
-          echo "https://x-access-token:${GH_TOKEN}@github.com" > ~/.git-credentials
+          gh auth setup-git
 
           # Fork the Extras repo (idempotent)
           gh repo fork ScoopInstaller/Extras --clone=false 2>/dev/null || true
@@ -377,11 +376,14 @@ jobs:
       - name: Install wingetcreate
         shell: pwsh
         run: |
+          # Download to a fixed location that won't be affected by checkout
+          $installDir = "$env:RUNNER_TEMP"
           $releases = Invoke-RestMethod "https://api.github.com/repos/microsoft/winget-create/releases/latest"
           $asset = $releases.assets | Where-Object { $_.name -eq "wingetcreate.exe" }
           if ($asset) {
-            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile wingetcreate.exe
-            echo "Downloaded wingetcreate.exe"
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$installDir\wingetcreate.exe"
+            echo "$installDir" >> $env:GITHUB_PATH
+            echo "Downloaded wingetcreate.exe to $installDir"
           } else {
             dotnet tool install --global Microsoft.WingetCreate
             echo "Installed via dotnet tool"
@@ -453,8 +455,7 @@ jobs:
           # Manual PR: fork, add manifests, create PR
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global credential.helper store
-          [System.IO.File]::WriteAllText("$env:USERPROFILE\.git-credentials", "https://x-access-token:$($env:SUBMIT_PAT)@github.com`n")
+          gh auth setup-git
 
           # Fork winget-pkgs (idempotent)
           gh repo fork microsoft/winget-pkgs --clone=false 2>&1 | Out-Null
