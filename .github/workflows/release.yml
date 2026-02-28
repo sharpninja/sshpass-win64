@@ -280,34 +280,59 @@ jobs:
           GH_TOKEN: ${{ secrets.SUBMIT_PAT }}
         shell: bash
         run: |
+          set -euo pipefail
           VERSION="${{ needs.package-and-release.outputs.version }}"
           MANIFEST_FILE="sshpass-scoop-manifest.json"
+          BRANCH="sshpass-v${VERSION}"
 
           echo "=== Submitting sshpass $VERSION to ScoopInstaller/Extras ==="
+
+          # --- Duplicate guard: check if PR already exists for this version ---
+          EXISTING_PR=$(gh pr list --repo ScoopInstaller/Extras \
+            --head "sharpninja:$BRANCH" \
+            --json number,state --jq '.[0].number' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ] && [ "$EXISTING_PR" != "" ]; then
+            echo "PR #$EXISTING_PR already exists for $BRANCH — skipping duplicate submission."
+            echo "=== Scoop submission skipped (duplicate) ==="
+            exit 0
+          fi
+
+          # --- Also check if sshpass.json already exists in Extras with this version ---
+          EXISTING_VERSION=$(gh api repos/ScoopInstaller/Extras/contents/bucket/sshpass.json \
+            --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null || echo "")
+          if [ "$EXISTING_VERSION" = "$VERSION" ]; then
+            echo "sshpass version $VERSION already exists in ScoopInstaller/Extras — skipping."
+            echo "=== Scoop submission skipped (already published) ==="
+            exit 0
+          fi
 
           # Configure git
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Fork the Extras repo (idempotent - won't fail if already forked)
+          # Fork the Extras repo (idempotent)
           gh repo fork ScoopInstaller/Extras --clone=false 2>/dev/null || true
+          sleep 3
 
-          # Clone our fork
+          # Clone our fork using gh (which handles auth automatically)
           gh repo clone sharpninja/Extras -- --depth=1 || {
             echo "Fork not ready yet, waiting..."
-            sleep 10
+            sleep 15
             gh repo clone sharpninja/Extras -- --depth=1
           }
 
           cd Extras
+
+          # Configure git to use GH_TOKEN for push auth
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/sharpninja/Extras.git"
 
           # Sync fork with upstream
           gh repo sync sharpninja/Extras --branch master 2>/dev/null || true
           git checkout master
           git pull origin master 2>/dev/null || true
 
-          # Create branch for this version
-          BRANCH="sshpass-v${VERSION}"
+          # Create branch
           git checkout -b "$BRANCH"
 
           # Copy manifest
@@ -318,17 +343,13 @@ jobs:
           git commit -m "sshpass: Add/update to version $VERSION"
           git push -u origin "$BRANCH" --force
 
-          # Create PR (or update existing)
-          EXISTING_PR=$(gh pr list --repo ScoopInstaller/Extras --head "sharpninja:$BRANCH" --json number --jq '.[0].number' 2>/dev/null)
-          if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
-            echo "PR #$EXISTING_PR already exists, updating..."
-          else
-            gh pr create \
-              --repo ScoopInstaller/Extras \
-              --head "sharpninja:$BRANCH" \
-              --base master \
-              --title "sshpass: Add/update to version $VERSION" \
-              --body "## New/Updated App Submission
+          # Create PR
+          gh pr create \
+            --repo ScoopInstaller/Extras \
+            --head "sharpninja:$BRANCH" \
+            --base master \
+            --title "sshpass: Add/update to version $VERSION" \
+            --body "## New/Updated App Submission
 
           **App name:** sshpass
           **Version:** $VERSION
@@ -339,7 +360,6 @@ jobs:
 
           ---
           *Automated submission from [sshpass-win64](https://github.com/sharpninja/sshpass-win64) CI/CD pipeline.*"
-          fi
 
           echo "=== Scoop submission complete ==="
 
@@ -355,19 +375,44 @@ jobs:
       - name: Install wingetcreate
         shell: pwsh
         run: |
-          # Download latest wingetcreate
           $releases = Invoke-RestMethod "https://api.github.com/repos/microsoft/winget-create/releases/latest"
           $asset = $releases.assets | Where-Object { $_.name -eq "wingetcreate.exe" }
           if ($asset) {
             Invoke-WebRequest -Uri $asset.browser_download_url -OutFile wingetcreate.exe
             echo "Downloaded wingetcreate.exe"
           } else {
-            # Fallback: try dotnet tool
             dotnet tool install --global Microsoft.WingetCreate
             echo "Installed via dotnet tool"
           }
 
+      - name: Check for existing winget submission
+        id: winget_check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.SUBMIT_PAT }}
+        run: |
+          $version = "${{ needs.package-and-release.outputs.version }}"
+
+          # Check if this version already exists in winget-pkgs
+          $manifestPath = "manifests/s/SharpNinja/sshpass/$version"
+          $response = gh api "repos/microsoft/winget-pkgs/contents/$manifestPath" 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            echo "Version $version already exists in winget-pkgs — skipping."
+            echo "SKIP=true" >> $env:GITHUB_OUTPUT
+          } else {
+            # Also check for open PRs with this version
+            $prs = gh pr list --repo microsoft/winget-pkgs --search "SharpNinja.sshpass $version" --json number,title --jq '.[].number' 2>&1
+            if ($prs -match '^\d+$') {
+              echo "Open PR found for version $version — skipping."
+              echo "SKIP=true" >> $env:GITHUB_OUTPUT
+            } else {
+              echo "No existing submission found for version $version."
+              echo "SKIP=false" >> $env:GITHUB_OUTPUT
+            }
+          }
+
       - name: Submit to winget-pkgs
+        if: steps.winget_check.outputs.SKIP != 'true'
         shell: pwsh
         env:
           SUBMIT_PAT: ${{ secrets.SUBMIT_PAT }}
@@ -378,14 +423,13 @@ jobs:
           echo "=== Submitting sshpass $version to winget-pkgs ==="
           echo "URL: $zipUrl"
 
-          # Try update first (for existing packages), fall back to new
           if (Test-Path ".\wingetcreate.exe") {
             $exe = ".\wingetcreate.exe"
           } else {
             $exe = "wingetcreate"
           }
 
-          # Try update (existing package)
+          # Try update first (for existing packages)
           & $exe update SharpNinja.sshpass `
             --urls $zipUrl `
             --version $version `
@@ -394,9 +438,17 @@ jobs:
 
           if ($LASTEXITCODE -ne 0) {
             echo "Update failed (package may not exist yet), trying new submission..."
+            # For 'new', use --out and --token (no --submit flag for new)
+            New-Item -ItemType Directory -Path manifests-out -Force
             & $exe new $zipUrl `
-              --submit `
+              --out manifests-out `
               --token $env:SUBMIT_PAT 2>&1
+
+            if ($LASTEXITCODE -ne 0) {
+              echo "WARNING: wingetcreate new also failed. Manual submission may be required."
+              echo "The winget manifests are available as release artifacts."
+              exit 1
+            }
           }
 
           echo "=== winget submission complete ==="
@@ -418,7 +470,29 @@ jobs:
         with:
           name: sshpass-exe
 
+      - name: Check for existing Chocolatey version
+        id: choco_check
+        shell: pwsh
+        run: |
+          $version = "${{ needs.package-and-release.outputs.version }}"
+
+          # Check if this version already exists on Chocolatey
+          try {
+            $response = Invoke-RestMethod "https://community.chocolatey.org/api/v2/package-versions/sshpass-win64" -ErrorAction Stop
+            if ($response -contains $version) {
+              echo "Version $version already exists on Chocolatey — skipping."
+              echo "SKIP=true" >> $env:GITHUB_OUTPUT
+              exit 0
+            }
+          } catch {
+            echo "Could not check Chocolatey API (package may not exist yet): $_"
+          }
+
+          echo "No existing version $version found on Chocolatey."
+          echo "SKIP=false" >> $env:GITHUB_OUTPUT
+
       - name: Build and push Chocolatey package
+        if: steps.choco_check.outputs.SKIP != 'true'
         shell: pwsh
         env:
           CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
