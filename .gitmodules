@@ -1,0 +1,6 @@
+[submodule "packaging/forks/Extras"]
+	path = packaging/forks/Extras
+	url = https://github.com/sharpninja/Extras.git
+[submodule "packaging/forks/winget-pkgs"]
+	path = packaging/forks/winget-pkgs
+	url = https://github.com/sharpninja/winget-pkgs.git

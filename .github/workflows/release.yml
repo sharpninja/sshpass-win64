@@ -269,7 +269,15 @@ jobs:
     needs: package-and-release
     if: needs.package-and-release.result == 'success'
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SUBMIT_PAT }}
+          submodules: true
+          fetch-depth: 1
+
       - name: Download Scoop manifest
         uses: actions/download-artifact@v4
         with:
@@ -282,59 +290,37 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ needs.package-and-release.outputs.version }}"
-          MANIFEST_FILE="sshpass-scoop-manifest.json"
           BRANCH="sshpass-v${VERSION}"
 
           echo "=== Submitting sshpass $VERSION to ScoopInstaller/Extras ==="
 
-          # --- Duplicate guard: check if PR already exists for this version ---
+          # --- Duplicate guard ---
           EXISTING_PR=$(gh pr list --repo ScoopInstaller/Extras \
             --head "sharpninja:$BRANCH" \
-            --json number,state --jq '.[0].number' 2>/dev/null || echo "")
-
-          if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ] && [ "$EXISTING_PR" != "" ]; then
-            echo "PR #$EXISTING_PR already exists for $BRANCH — skipping duplicate submission."
-            echo "=== Scoop submission skipped (duplicate) ==="
+            --json number --jq '.[0].number' 2>/dev/null || echo "")
+          if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
+            echo "PR #$EXISTING_PR already exists — skipping."
             exit 0
           fi
 
-          # --- Also check if sshpass.json already exists in Extras with this version ---
-          EXISTING_VERSION=$(gh api repos/ScoopInstaller/Extras/contents/bucket/sshpass.json \
-            --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null || echo "")
-          if [ "$EXISTING_VERSION" = "$VERSION" ]; then
-            echo "sshpass version $VERSION already exists in ScoopInstaller/Extras — skipping."
-            echo "=== Scoop submission skipped (already published) ==="
-            exit 0
-          fi
-
-          # Configure git — use gh CLI as credential helper (avoids token masking issues)
+          # Configure git
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          gh auth setup-git
 
-          # Fork the Extras repo (idempotent)
-          gh repo fork ScoopInstaller/Extras --clone=false 2>/dev/null || true
-          sleep 3
+          # Work in the submodule (already cloned with SUBMIT_PAT credentials)
+          cd packaging/forks/Extras
 
-          # Clone our fork using gh (which handles auth automatically)
-          gh repo clone sharpninja/Extras -- --depth=1 || {
-            echo "Fork not ready yet, waiting..."
-            sleep 15
-            gh repo clone sharpninja/Extras -- --depth=1
-          }
-
-          cd Extras
-
-          # Sync fork with upstream
-          gh repo sync sharpninja/Extras --branch master 2>/dev/null || true
-          git checkout master
-          git pull origin master 2>/dev/null || true
+          # Sync with upstream and update
+          git remote add upstream https://github.com/ScoopInstaller/Extras.git 2>/dev/null || true
+          git fetch upstream master --depth=1
+          git checkout -B master upstream/master
+          git push origin master --force 2>/dev/null || true
 
           # Create branch
           git checkout -b "$BRANCH"
 
           # Copy manifest
-          cp "../$MANIFEST_FILE" bucket/sshpass.json
+          cp "$GITHUB_WORKSPACE/sshpass-scoop-manifest.json" bucket/sshpass.json
 
           # Commit and push
           git add bucket/sshpass.json
@@ -359,9 +345,6 @@ jobs:
           ---
           *Automated submission from [sshpass-win64](https://github.com/sharpninja/sshpass-win64) CI/CD pipeline.*"
 
-          # Clean up credentials
-          rm -f ~/.git-credentials
-
           echo "=== Scoop submission complete ==="
 
   # ============================================================
@@ -372,11 +355,11 @@ jobs:
     needs: package-and-release
     if: needs.package-and-release.result == 'success'
     runs-on: windows-latest
+    continue-on-error: true
     steps:
       - name: Install wingetcreate
         shell: pwsh
         run: |
-          # Download to a fixed location that won't be affected by checkout
           $installDir = "$env:RUNNER_TEMP"
           $releases = Invoke-RestMethod "https://api.github.com/repos/microsoft/winget-create/releases/latest"
           $asset = $releases.assets | Where-Object { $_.name -eq "wingetcreate.exe" }
@@ -396,16 +379,13 @@ jobs:
           GH_TOKEN: ${{ secrets.SUBMIT_PAT }}
         run: |
           $version = "${{ needs.package-and-release.outputs.version }}"
-
-          # Check if this version already exists in winget-pkgs
           $manifestPath = "manifests/s/SharpNinja/sshpass/$version"
           $response = gh api "repos/microsoft/winget-pkgs/contents/$manifestPath" 2>&1
           if ($LASTEXITCODE -eq 0) {
             echo "Version $version already exists in winget-pkgs — skipping."
             echo "SKIP=true" >> $env:GITHUB_OUTPUT
           } else {
-            # Also check for open PRs with this version
-            $prs = gh pr list --repo microsoft/winget-pkgs --search "SharpNinja.sshpass $version" --json number,title --jq '.[].number' 2>&1
+            $prs = gh pr list --repo microsoft/winget-pkgs --search "SharpNinja.sshpass $version" --json number --jq '.[].number' 2>&1
             if ($prs -match '^\d+$') {
               echo "Open PR found for version $version — skipping."
               echo "SKIP=true" >> $env:GITHUB_OUTPUT
@@ -415,9 +395,43 @@ jobs:
             }
           }
 
-      - name: Checkout for manifests
+      - name: Checkout with submodules
         if: steps.winget_check.outputs.SKIP != 'true'
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SUBMIT_PAT }}
+          submodules: false
+          fetch-depth: 1
+
+      - name: Restore winget-pkgs cache
+        if: steps.winget_check.outputs.SKIP != 'true'
+        id: cache_winget
+        uses: actions/cache@v4
+        with:
+          path: packaging/forks/winget-pkgs
+          key: winget-pkgs-submodule-v1
+
+      - name: Initialize winget-pkgs submodule
+        if: steps.winget_check.outputs.SKIP != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.SUBMIT_PAT }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+
+          if ("${{ steps.cache_winget.outputs.cache-hit }}" -eq "true") {
+            echo "Cache hit — pulling latest from fork..."
+            Set-Location packaging/forks/winget-pkgs
+            git remote set-url origin https://github.com/sharpninja/winget-pkgs.git
+            git fetch origin master --depth=1
+            git checkout master
+            git reset --hard origin/master
+          } else {
+            echo "Cache miss — cloning winget-pkgs submodule (shallow)..."
+            git submodule update --init --depth=1 packaging/forks/winget-pkgs
+          }
 
       - name: Submit to winget-pkgs
         if: steps.winget_check.outputs.SKIP != 'true'
@@ -432,44 +446,29 @@ jobs:
 
           echo "=== Submitting sshpass $version to winget-pkgs ==="
 
-          if (Test-Path ".\wingetcreate.exe") {
-            $exe = ".\wingetcreate.exe"
-          } else {
-            $exe = "wingetcreate"
-          }
+          $exe = "wingetcreate"
+          if (Test-Path ".\wingetcreate.exe") { $exe = ".\wingetcreate.exe" }
 
-          # Try update first (works for existing packages, non-interactive)
+          # Try wingetcreate update first (works for existing packages)
           & $exe update SharpNinja.sshpass `
-            --urls $zipUrl `
-            --version $version `
-            --submit `
+            --urls $zipUrl --version $version --submit `
             --token $env:SUBMIT_PAT 2>&1
 
           if ($LASTEXITCODE -eq 0) {
-            echo "=== winget submission complete (via update) ==="
+            echo "=== winget submission complete (via wingetcreate) ==="
             exit 0
           }
 
-          echo "Update failed — using manual PR approach for first-time submission..."
+          echo "wingetcreate update failed — using submodule PR approach..."
 
-          # Manual PR: fork, add manifests, create PR
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          gh auth setup-git
+          # Work in the submodule (credentials from checkout token)
+          Set-Location packaging/forks/winget-pkgs
 
-          # Fork winget-pkgs (idempotent)
-          gh repo fork microsoft/winget-pkgs --clone=false 2>&1 | Out-Null
-
-          Start-Sleep -Seconds 5
-
-          # Clone fork (shallow)
-          gh repo clone sharpninja/winget-pkgs -- --depth=1
-          Set-Location winget-pkgs
-
-          # Sync and branch
+          # Sync with upstream
+          git remote add upstream https://github.com/microsoft/winget-pkgs.git 2>$null
           gh repo sync sharpninja/winget-pkgs --branch master 2>&1 | Out-Null
-          git checkout master
-          git pull origin master 2>&1 | Out-Null
+          git fetch origin master --depth=1
+          git checkout -B master origin/master
 
           $branch = "SharpNinja.sshpass-$version"
           git checkout -b $branch
@@ -478,7 +477,7 @@ jobs:
           $manifestDir = "manifests/s/SharpNinja/sshpass/$version"
           New-Item -ItemType Directory -Path $manifestDir -Force
 
-          # Build manifests from templates with actual values
+          # Build manifests from templates
           $content = Get-Content "$env:GITHUB_WORKSPACE\packaging\winget\SharpNinja.sshpass.yaml" -Raw
           $content = $content -replace '1\.10\.0', $version
           $content | Set-Content "$manifestDir\SharpNinja.sshpass.yaml"
@@ -506,10 +505,7 @@ jobs:
             --title "New package: SharpNinja.sshpass version $version" `
             --body "### New Package Submission`n`n- PackageIdentifier: SharpNinja.sshpass`n- PackageVersion: $version`n- URL: $zipUrl`n`nNative Windows 64-bit port of sshpass using the ConPTY API.`n`n---`n*Automated submission from [sshpass-win64](https://github.com/sharpninja/sshpass-win64) CI/CD pipeline.*"
 
-          # Clean up
-          Remove-Item "$env:USERPROFILE\.git-credentials" -Force -ErrorAction SilentlyContinue
-
-          echo "=== winget submission complete (via manual PR) ==="
+          echo "=== winget submission complete (via submodule PR) ==="
 
   # ============================================================
   # Deploy to Chocolatey Community Repository
