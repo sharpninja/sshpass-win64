@@ -307,9 +307,11 @@ jobs:
             exit 0
           fi
 
-          # Configure git
+          # Configure git with credential helper that uses GH_TOKEN
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global credential.helper store
+          echo "https://x-access-token:${GH_TOKEN}@github.com" > ~/.git-credentials
 
           # Fork the Extras repo (idempotent)
           gh repo fork ScoopInstaller/Extras --clone=false 2>/dev/null || true
@@ -323,9 +325,6 @@ jobs:
           }
 
           cd Extras
-
-          # Configure git to use GH_TOKEN for push auth
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/sharpninja/Extras.git"
 
           # Sync fork with upstream
           gh repo sync sharpninja/Extras --branch master 2>/dev/null || true
@@ -360,6 +359,9 @@ jobs:
 
           ---
           *Automated submission from [sshpass-win64](https://github.com/sharpninja/sshpass-win64) CI/CD pipeline.*"
+
+          # Clean up credentials
+          rm -f ~/.git-credentials
 
           echo "=== Scoop submission complete ==="
 
@@ -411,17 +413,22 @@ jobs:
             }
           }
 
+      - name: Checkout for manifests
+        if: steps.winget_check.outputs.SKIP != 'true'
+        uses: actions/checkout@v4
+
       - name: Submit to winget-pkgs
         if: steps.winget_check.outputs.SKIP != 'true'
         shell: pwsh
         env:
           SUBMIT_PAT: ${{ secrets.SUBMIT_PAT }}
+          GH_TOKEN: ${{ secrets.SUBMIT_PAT }}
         run: |
           $version = "${{ needs.package-and-release.outputs.version }}"
           $zipUrl = "${{ needs.package-and-release.outputs.zip_url }}"
+          $hash = "${{ needs.package-and-release.outputs.zip_hash }}"
 
           echo "=== Submitting sshpass $version to winget-pkgs ==="
-          echo "URL: $zipUrl"
 
           if (Test-Path ".\wingetcreate.exe") {
             $exe = ".\wingetcreate.exe"
@@ -429,29 +436,79 @@ jobs:
             $exe = "wingetcreate"
           }
 
-          # Try update first (for existing packages)
+          # Try update first (works for existing packages, non-interactive)
           & $exe update SharpNinja.sshpass `
             --urls $zipUrl `
             --version $version `
             --submit `
             --token $env:SUBMIT_PAT 2>&1
 
-          if ($LASTEXITCODE -ne 0) {
-            echo "Update failed (package may not exist yet), trying new submission..."
-            # For 'new', use --out and --token (no --submit flag for new)
-            New-Item -ItemType Directory -Path manifests-out -Force
-            & $exe new $zipUrl `
-              --out manifests-out `
-              --token $env:SUBMIT_PAT 2>&1
-
-            if ($LASTEXITCODE -ne 0) {
-              echo "WARNING: wingetcreate new also failed. Manual submission may be required."
-              echo "The winget manifests are available as release artifacts."
-              exit 1
-            }
+          if ($LASTEXITCODE -eq 0) {
+            echo "=== winget submission complete (via update) ==="
+            exit 0
           }
 
-          echo "=== winget submission complete ==="
+          echo "Update failed — using manual PR approach for first-time submission..."
+
+          # Manual PR: fork, add manifests, create PR
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global credential.helper store
+          [System.IO.File]::WriteAllText("$env:USERPROFILE\.git-credentials", "https://x-access-token:$($env:SUBMIT_PAT)@github.com`n")
+
+          # Fork winget-pkgs (idempotent)
+          gh repo fork microsoft/winget-pkgs --clone=false 2>&1 | Out-Null
+
+          Start-Sleep -Seconds 5
+
+          # Clone fork (shallow)
+          gh repo clone sharpninja/winget-pkgs -- --depth=1
+          Set-Location winget-pkgs
+
+          # Sync and branch
+          gh repo sync sharpninja/winget-pkgs --branch master 2>&1 | Out-Null
+          git checkout master
+          git pull origin master 2>&1 | Out-Null
+
+          $branch = "SharpNinja.sshpass-$version"
+          git checkout -b $branch
+
+          # Create manifest directory
+          $manifestDir = "manifests/s/SharpNinja/sshpass/$version"
+          New-Item -ItemType Directory -Path $manifestDir -Force
+
+          # Build manifests from templates with actual values
+          $content = Get-Content "$env:GITHUB_WORKSPACE\packaging\winget\SharpNinja.sshpass.yaml" -Raw
+          $content = $content -replace '1\.10\.0', $version
+          $content | Set-Content "$manifestDir\SharpNinja.sshpass.yaml"
+
+          $content = Get-Content "$env:GITHUB_WORKSPACE\packaging\winget\SharpNinja.sshpass.locale.en-US.yaml" -Raw
+          $content = $content -replace '1\.10\.0', $version
+          $content | Set-Content "$manifestDir\SharpNinja.sshpass.locale.en-US.yaml"
+
+          $content = Get-Content "$env:GITHUB_WORKSPACE\packaging\winget\SharpNinja.sshpass.installer.yaml" -Raw
+          $content = $content -replace '1\.10\.0', $version
+          $content = $content -replace 'PLACEHOLDER_HASH', $hash
+          $content = $content -replace 'https://github\.com/sharpninja/sshpass-win64/releases/download/v1\.10\.0/sshpass-win64-1\.10\.0\.zip', $zipUrl
+          $content | Set-Content "$manifestDir\SharpNinja.sshpass.installer.yaml"
+
+          # Commit and push
+          git add manifests/
+          git commit -m "New package: SharpNinja.sshpass version $version"
+          git push -u origin $branch --force
+
+          # Create PR
+          gh pr create `
+            --repo microsoft/winget-pkgs `
+            --head "sharpninja:$branch" `
+            --base master `
+            --title "New package: SharpNinja.sshpass version $version" `
+            --body "### New Package Submission`n`n- PackageIdentifier: SharpNinja.sshpass`n- PackageVersion: $version`n- URL: $zipUrl`n`nNative Windows 64-bit port of sshpass using the ConPTY API.`n`n---`n*Automated submission from [sshpass-win64](https://github.com/sharpninja/sshpass-win64) CI/CD pipeline.*"
+
+          # Clean up
+          Remove-Item "$env:USERPROFILE\.git-credentials" -Force -ErrorAction SilentlyContinue
+
+          echo "=== winget submission complete (via manual PR) ==="
 
   # ============================================================
   # Deploy to Chocolatey Community Repository
