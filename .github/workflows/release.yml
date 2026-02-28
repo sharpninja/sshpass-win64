@@ -354,6 +354,9 @@ jobs:
     runs-on: windows-latest
     continue-on-error: true
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Install wingetcreate
         shell: pwsh
         run: |
@@ -376,66 +379,31 @@ jobs:
           GH_TOKEN: ${{ secrets.SUBMIT_PAT }}
         run: |
           $version = "${{ needs.package-and-release.outputs.version }}"
+
+          # Check if version already exists in winget-pkgs
           $manifestPath = "manifests/s/SharpNinja/sshpass/$version"
           $response = gh api "repos/microsoft/winget-pkgs/contents/$manifestPath" 2>&1
           if ($LASTEXITCODE -eq 0) {
             echo "Version $version already exists in winget-pkgs — skipping."
             echo "SKIP=true" >> $env:GITHUB_OUTPUT
-          } else {
-            $prs = gh pr list --repo microsoft/winget-pkgs --search "SharpNinja.sshpass $version" --json number --jq '.[].number' 2>&1
-            if ($prs -match '^\d+$') {
-              echo "Open PR found for version $version — skipping."
-              echo "SKIP=true" >> $env:GITHUB_OUTPUT
-            } else {
-              echo "No existing submission found for version $version."
-              echo "SKIP=false" >> $env:GITHUB_OUTPUT
-            }
+            exit 0
           }
 
-      - name: Checkout with submodules
-        if: steps.winget_check.outputs.SKIP != 'true'
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.SUBMIT_PAT }}
-          submodules: false
-          fetch-depth: 1
-
-      - name: Restore winget-pkgs cache
-        if: steps.winget_check.outputs.SKIP != 'true'
-        id: cache_winget
-        uses: actions/cache@v4
-        with:
-          path: packaging/forks/winget-pkgs
-          key: winget-pkgs-submodule-v1
-
-      - name: Initialize winget-pkgs submodule
-        if: steps.winget_check.outputs.SKIP != 'true'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.SUBMIT_PAT }}
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          gh auth setup-git
-
-          if ("${{ steps.cache_winget.outputs.cache-hit }}" -eq "true") {
-            echo "Cache hit — pulling latest from fork..."
-            Set-Location packaging/forks/winget-pkgs
-            git remote set-url origin https://github.com/sharpninja/winget-pkgs.git
-            git fetch origin master --depth=1
-            git checkout master
-            git reset --hard origin/master
+          # Check for open PRs
+          $prs = gh pr list --repo microsoft/winget-pkgs --search "SharpNinja.sshpass $version" --json number --jq '.[].number' 2>&1
+          if ($prs -match '^\d+$') {
+            echo "Open PR found for version $version — skipping."
+            echo "SKIP=true" >> $env:GITHUB_OUTPUT
           } else {
-            echo "Cache miss — cloning winget-pkgs submodule (shallow)..."
-            git submodule update --init --depth=1 packaging/forks/winget-pkgs
+            echo "No existing submission found for version $version."
+            echo "SKIP=false" >> $env:GITHUB_OUTPUT
           }
 
-      - name: Submit to winget-pkgs
+      - name: Build and submit winget manifests
         if: steps.winget_check.outputs.SKIP != 'true'
         shell: pwsh
         env:
           SUBMIT_PAT: ${{ secrets.SUBMIT_PAT }}
-          GH_TOKEN: ${{ secrets.SUBMIT_PAT }}
         run: |
           $version = "${{ needs.package-and-release.outputs.version }}"
           $zipUrl = "${{ needs.package-and-release.outputs.zip_url }}"
@@ -443,73 +411,46 @@ jobs:
 
           echo "=== Submitting sshpass $version to winget-pkgs ==="
 
-          $exe = "wingetcreate"
-          if (Test-Path ".\wingetcreate.exe") { $exe = ".\wingetcreate.exe" }
-
-          # Try wingetcreate update first (works for existing packages)
-          & $exe update SharpNinja.sshpass `
-            --urls $zipUrl --version $version --submit `
-            --token $env:SUBMIT_PAT 2>&1
+          # First try wingetcreate update (works if package already exists)
+          wingetcreate update SharpNinja.sshpass `
+            --urls $zipUrl --version $version `
+            --submit --token $env:SUBMIT_PAT 2>&1
 
           if ($LASTEXITCODE -eq 0) {
-            echo "=== winget submission complete (via wingetcreate) ==="
+            echo "=== winget submission complete (via wingetcreate update) ==="
             exit 0
           }
 
-          echo "wingetcreate update failed — using submodule PR approach..."
+          echo "wingetcreate update failed (new package?) — using wingetcreate submit..."
 
-          # Work in the submodule
-          Set-Location packaging/forks/winget-pkgs
-
-          # Configure git credential store for pushing to fork
-          $pat = $env:SUBMIT_PAT
-          git config credential.helper store
-          $credLine = "https://x-access-token:${pat}@github.com"
-          [System.IO.File]::WriteAllText("$env:USERPROFILE\.git-credentials", $credLine)
-          git remote set-url origin "https://github.com/sharpninja/winget-pkgs.git"
-
-          # Sync with upstream
-          git remote add upstream https://github.com/microsoft/winget-pkgs.git 2>$null
-          gh repo sync sharpninja/winget-pkgs --branch master 2>&1 | Out-Null
-          git fetch origin master --depth=1
-          git checkout -B master origin/master
-
-          $branch = "SharpNinja.sshpass-$version"
-          git checkout -b $branch
-
-          # Create manifest directory
-          $manifestDir = "manifests/s/SharpNinja/sshpass/$version"
+          # Build manifests from templates into a directory
+          $manifestDir = "winget-manifests"
           New-Item -ItemType Directory -Path $manifestDir -Force
 
-          # Build manifests from templates
-          $content = Get-Content "$env:GITHUB_WORKSPACE\packaging\winget\SharpNinja.sshpass.yaml" -Raw
+          $content = Get-Content "packaging\winget\SharpNinja.sshpass.yaml" -Raw
           $content = $content -replace '1\.10\.0', $version
           $content | Set-Content "$manifestDir\SharpNinja.sshpass.yaml"
 
-          $content = Get-Content "$env:GITHUB_WORKSPACE\packaging\winget\SharpNinja.sshpass.locale.en-US.yaml" -Raw
+          $content = Get-Content "packaging\winget\SharpNinja.sshpass.locale.en-US.yaml" -Raw
           $content = $content -replace '1\.10\.0', $version
           $content | Set-Content "$manifestDir\SharpNinja.sshpass.locale.en-US.yaml"
 
-          $content = Get-Content "$env:GITHUB_WORKSPACE\packaging\winget\SharpNinja.sshpass.installer.yaml" -Raw
+          $content = Get-Content "packaging\winget\SharpNinja.sshpass.installer.yaml" -Raw
           $content = $content -replace '1\.10\.0', $version
           $content = $content -replace 'PLACEHOLDER_HASH', $hash
           $content = $content -replace 'https://github\.com/sharpninja/sshpass-win64/releases/download/v1\.10\.0/sshpass-win64-1\.10\.0\.zip', $zipUrl
           $content | Set-Content "$manifestDir\SharpNinja.sshpass.installer.yaml"
 
-          # Commit and push
-          git add manifests/
-          git commit -m "New package: SharpNinja.sshpass version $version"
-          git push -u origin $branch --force
+          echo "--- Manifest files ---"
+          Get-ChildItem $manifestDir | ForEach-Object { echo $_.Name }
 
-          # Create PR
-          gh pr create `
-            --repo microsoft/winget-pkgs `
-            --head "sharpninja:$branch" `
-            --base master `
-            --title "New package: SharpNinja.sshpass version $version" `
-            --body "### New Package Submission`n`n- PackageIdentifier: SharpNinja.sshpass`n- PackageVersion: $version`n- URL: $zipUrl`n`nNative Windows 64-bit port of sshpass using the ConPTY API.`n`n---`n*Automated submission from [sshpass-win64](https://github.com/sharpninja/sshpass-win64) CI/CD pipeline.*"
+          # Submit pre-built manifests via wingetcreate submit
+          wingetcreate submit `
+            --prtitle "New package: SharpNinja.sshpass version $version" `
+            --token $env:SUBMIT_PAT `
+            $manifestDir
 
-          echo "=== winget submission complete (via submodule PR) ==="
+          echo "=== winget submission complete (via wingetcreate submit) ==="
 
   # ============================================================
   # Deploy to Chocolatey Community Repository
