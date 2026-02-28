@@ -294,15 +294,6 @@ jobs:
 
           echo "=== Submitting sshpass $VERSION to ScoopInstaller/Extras ==="
 
-          # --- Duplicate guard ---
-          PR_COUNT=$(gh pr list --repo ScoopInstaller/Extras \
-            --head "sharpninja:$BRANCH" --state all \
-            --json number --jq 'length' 2>/dev/null || echo "0")
-          if [ "$PR_COUNT" -gt 0 ] 2>/dev/null; then
-            echo "PR already exists ($PR_COUNT found) for branch $BRANCH — skipping."
-            exit 0
-          fi
-
           # Configure git
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -327,8 +318,8 @@ jobs:
           git commit -m "sshpass: Add/update to version $VERSION"
           git push -u origin "$BRANCH" --force
 
-          # Create PR
-          gh pr create \
+          # Create PR (or skip if already exists)
+          PR_URL=$(gh pr create \
             --repo ScoopInstaller/Extras \
             --head "sharpninja:$BRANCH" \
             --base master \
@@ -343,7 +334,13 @@ jobs:
           This is a native Windows 64-bit port of the Linux \`sshpass\` utility, using the Windows ConPTY API instead of Unix PTY.
 
           ---
-          *Automated submission from [sshpass-win64](https://github.com/sharpninja/sshpass-win64) CI/CD pipeline.*"
+          *Automated submission from [sshpass-win64](https://github.com/sharpninja/sshpass-win64) CI/CD pipeline.*" 2>&1) || true
+
+          if echo "$PR_URL" | grep -q "already exists"; then
+            echo "PR already exists — skipping. $PR_URL"
+          else
+            echo "PR created: $PR_URL"
+          fi
 
           echo "=== Scoop submission complete ==="
 
@@ -464,8 +461,12 @@ jobs:
           # Work in the submodule
           Set-Location packaging/forks/winget-pkgs
 
-          # Configure authenticated remote URL for pushing to fork
-          git remote set-url origin "https://x-access-token:$($env:SUBMIT_PAT)@github.com/sharpninja/winget-pkgs.git"
+          # Configure git credential store for pushing to fork
+          $pat = $env:SUBMIT_PAT
+          git config credential.helper store
+          $credLine = "https://x-access-token:${pat}@github.com"
+          [System.IO.File]::WriteAllText("$env:USERPROFILE\.git-credentials", $credLine)
+          git remote set-url origin "https://github.com/sharpninja/winget-pkgs.git"
 
           # Sync with upstream
           git remote add upstream https://github.com/microsoft/winget-pkgs.git 2>$null
