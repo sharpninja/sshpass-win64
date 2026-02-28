@@ -295,11 +295,11 @@ jobs:
           echo "=== Submitting sshpass $VERSION to ScoopInstaller/Extras ==="
 
           # --- Duplicate guard ---
-          EXISTING_PR=$(gh pr list --repo ScoopInstaller/Extras \
-            --head "sharpninja:$BRANCH" \
-            --json number --jq '.[0].number' 2>/dev/null || echo "")
-          if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
-            echo "PR #$EXISTING_PR already exists — skipping."
+          PR_COUNT=$(gh pr list --repo ScoopInstaller/Extras \
+            --head "sharpninja:$BRANCH" --state all \
+            --json number --jq 'length' 2>/dev/null || echo "0")
+          if [ "$PR_COUNT" -gt 0 ] 2>/dev/null; then
+            echo "PR already exists ($PR_COUNT found) for branch $BRANCH — skipping."
             exit 0
           fi
 
@@ -461,14 +461,11 @@ jobs:
 
           echo "wingetcreate update failed — using submodule PR approach..."
 
-          # Configure git credentials for pushing to fork
-          gh auth setup-git
-
           # Work in the submodule
           Set-Location packaging/forks/winget-pkgs
 
-          # Ensure origin uses the authenticated URL
-          git remote set-url origin "https://github.com/sharpninja/winget-pkgs.git"
+          # Configure authenticated remote URL for pushing to fork
+          git remote set-url origin "https://x-access-token:$($env:SUBMIT_PAT)@github.com/sharpninja/winget-pkgs.git"
 
           # Sync with upstream
           git remote add upstream https://github.com/microsoft/winget-pkgs.git 2>$null
