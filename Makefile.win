@@ -1,0 +1,24 @@
+# Makefile for building sshpass on Windows with MinGW64
+# Usage: make -f Makefile.win
+
+CC = gcc
+CFLAGS = -Wall -O2 -D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006
+LDFLAGS =
+LIBS = -lkernel32
+
+TARGET = sshpass.exe
+SRC = main_win.c
+OBJ = main_win.o
+
+all: $(TARGET)
+
+$(TARGET): $(OBJ)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+
+$(OBJ): $(SRC)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -f $(OBJ) $(TARGET)
+
+.PHONY: all clean
