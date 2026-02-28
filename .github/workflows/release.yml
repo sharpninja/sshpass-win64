@@ -6,6 +6,12 @@ on:
       - 'v*'
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag to create release for (e.g. v1.10.0). Leave empty for build+test only.'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -61,7 +67,7 @@ jobs:
   package-and-release:
     name: Package & Release
     needs: build-and-test
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -76,8 +82,10 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
+          $tag = "${{ github.event.inputs.release_tag || github.ref_name }}"
+          $version = $tag.TrimStart('v')
           echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+          echo "TAG=$tag" >> $env:GITHUB_OUTPUT
           echo "Version: $version"
 
       - name: Create release zip
