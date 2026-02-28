@@ -88,7 +88,8 @@ jobs:
           echo "TAG=$tag" >> $env:GITHUB_OUTPUT
           echo "Version: $version"
 
-      - name: Create release zip
+      - name: Create release zip and compute hash
+        id: zip
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
@@ -103,87 +104,21 @@ jobs:
 
           # Create zip
           Compress-Archive -Path staging/* -DestinationPath $zipName
-          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
 
           # Compute SHA256
           $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash
-          echo "ZIP_HASH=$hash" >> $env:GITHUB_ENV
-          echo "SHA256: $hash"
-
-          # Save hash to file for reference
           "$hash" | Out-File -FilePath "sha256.txt" -NoNewline
 
-      - name: Build Chocolatey package
-        shell: pwsh
-        run: |
-          $version = "${{ steps.version.outputs.VERSION }}"
-          $hash = $env:ZIP_HASH
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_OUTPUT
+          echo "ZIP_HASH=$hash" >> $env:GITHUB_OUTPUT
+          echo "SHA256: $hash"
 
-          # Update nuspec version
-          $nuspecPath = "packaging/chocolatey/sshpass-win64.nuspec"
-          (Get-Content $nuspecPath) -replace '\$VERSION\$', $version | Set-Content $nuspecPath
-
-          # Update install script checksum
-          $installPath = "packaging/chocolatey/tools/chocolateyinstall.ps1"
-          (Get-Content $installPath) -replace '\$CHECKSUM\$', $hash | Set-Content $installPath
-
-          # Pack (if choco is available)
-          if (Get-Command choco -ErrorAction SilentlyContinue) {
-            Push-Location packaging/chocolatey
-            choco pack
-            Pop-Location
-            $nupkg = Get-ChildItem packaging/chocolatey/*.nupkg | Select-Object -First 1
-            if ($nupkg) {
-              Copy-Item $nupkg.FullName .
-              echo "NUPKG_NAME=$($nupkg.Name)" >> $env:GITHUB_ENV
-            }
-          } else {
-            echo "Chocolatey not available, skipping .nupkg creation"
-            # Create a zip of the chocolatey package files instead
-            Compress-Archive -Path packaging/chocolatey/* -DestinationPath "sshpass-win64-$version-chocolatey.zip"
-            echo "NUPKG_NAME=sshpass-win64-$version-chocolatey.zip" >> $env:GITHUB_ENV
-          }
-
-      - name: Update Scoop manifest
-        shell: pwsh
-        run: |
-          $version = "${{ steps.version.outputs.VERSION }}"
-          $hash = $env:ZIP_HASH
-
-          $manifest = Get-Content packaging/scoop/sshpass.json | ConvertFrom-Json
-          $manifest.version = $version
-          $manifest.architecture.'64bit'.url = "https://github.com/sharpninja/sshpass-win64/releases/download/v$version/sshpass-win64-$version.zip"
-          $manifest.architecture.'64bit'.hash = $hash
-          $manifest | ConvertTo-Json -Depth 10 | Set-Content packaging/scoop/sshpass.json
-
-          # Also copy to release artifacts
-          Copy-Item packaging/scoop/sshpass.json sshpass-scoop-manifest.json
-
-      - name: Update winget manifests
-        shell: pwsh
-        run: |
-          $version = "${{ steps.version.outputs.VERSION }}"
-          $hash = $env:ZIP_HASH
-
-          # Update version manifest
-          $versionYaml = "packaging/winget/SharpNinja.sshpass.yaml"
-          (Get-Content $versionYaml) -replace '1\.10\.0', $version | Set-Content $versionYaml
-
-          # Update locale manifest
-          $localeYaml = "packaging/winget/SharpNinja.sshpass.locale.en-US.yaml"
-          (Get-Content $localeYaml) -replace '1\.10\.0', $version | Set-Content $localeYaml
-
-          # Update installer manifest
-          $installerYaml = "packaging/winget/SharpNinja.sshpass.installer.yaml"
-          (Get-Content $installerYaml) -replace '1\.10\.0', $version | Set-Content $installerYaml
-          (Get-Content $installerYaml) -replace 'PLACEHOLDER_HASH', $hash | Set-Content $installerYaml
-
-          # Create a zip of winget manifests
-          Compress-Archive -Path packaging/winget/* -DestinationPath "sshpass-winget-manifests-$version.zip"
-
+      # Step 1: Create the GitHub Release with the primary artifacts (zip + hash)
       - name: Create GitHub Release
+        id: create_release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.TAG }}
           name: sshpass-win64 v${{ steps.version.outputs.VERSION }}
           body: |
             ## sshpass-win64 v${{ steps.version.outputs.VERSION }}
@@ -192,8 +127,6 @@ jobs:
 
             ### Downloads
             - **`sshpass-win64-${{ steps.version.outputs.VERSION }}.zip`** — Standalone binary (just extract and use)
-            - **`sshpass-scoop-manifest.json`** — Scoop manifest for bucket integration
-            - **`sshpass-winget-manifests-${{ steps.version.outputs.VERSION }}.zip`** — Winget manifest files
 
             ### Install via Scoop
             ```powershell
@@ -210,13 +143,115 @@ jobs:
             - Windows 10 version 1809 or later
 
             ### SHA256
-            `${{ env.ZIP_HASH }}`
+            `${{ steps.zip.outputs.ZIP_HASH }}`
           draft: false
           prerelease: false
           generate_release_notes: true
           files: |
-            sshpass-win64-${{ steps.version.outputs.VERSION }}.zip
+            ${{ steps.zip.outputs.ZIP_NAME }}
+            sha256.txt
+
+      # Step 2: Now that the release exists, get the actual download URL for the zip
+      - name: Get release artifact URL
+        id: release_url
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $tag = "${{ steps.version.outputs.TAG }}"
+          # The download URL for release assets follows this pattern:
+          $zipUrl = "https://github.com/sharpninja/sshpass-win64/releases/download/$tag/sshpass-win64-$version.zip"
+          echo "ZIP_URL=$zipUrl" >> $env:GITHUB_OUTPUT
+          echo "Release zip URL: $zipUrl"
+
+      # Step 3: Build package manifests using the actual release URL
+      - name: Build Scoop manifest
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $hash = "${{ steps.zip.outputs.ZIP_HASH }}"
+          $zipUrl = "${{ steps.release_url.outputs.ZIP_URL }}"
+
+          $manifest = Get-Content packaging/scoop/sshpass.json | ConvertFrom-Json
+          $manifest.version = $version
+          $manifest.architecture.'64bit'.url = $zipUrl
+          $manifest.architecture.'64bit'.hash = $hash
+          $manifest | ConvertTo-Json -Depth 10 | Set-Content sshpass-scoop-manifest.json
+
+          echo "Scoop manifest URL: $zipUrl"
+          Get-Content sshpass-scoop-manifest.json
+
+      - name: Build winget manifests
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $hash = "${{ steps.zip.outputs.ZIP_HASH }}"
+          $zipUrl = "${{ steps.release_url.outputs.ZIP_URL }}"
+
+          # Copy and update manifests
+          New-Item -ItemType Directory -Path winget-out -Force
+
+          # Version manifest
+          $content = Get-Content packaging/winget/SharpNinja.sshpass.yaml -Raw
+          $content = $content -replace '1\.10\.0', $version
+          $content | Set-Content winget-out/SharpNinja.sshpass.yaml
+
+          # Locale manifest
+          $content = Get-Content packaging/winget/SharpNinja.sshpass.locale.en-US.yaml -Raw
+          $content = $content -replace '1\.10\.0', $version
+          $content | Set-Content winget-out/SharpNinja.sshpass.locale.en-US.yaml
+
+          # Installer manifest - use actual release URL
+          $content = Get-Content packaging/winget/SharpNinja.sshpass.installer.yaml -Raw
+          $content = $content -replace '1\.10\.0', $version
+          $content = $content -replace 'PLACEHOLDER_HASH', $hash
+          $content = $content -replace 'https://github\.com/sharpninja/sshpass-win64/releases/download/v1\.10\.0/sshpass-win64-1\.10\.0\.zip', $zipUrl
+          $content | Set-Content winget-out/SharpNinja.sshpass.installer.yaml
+
+          Compress-Archive -Path winget-out/* -DestinationPath "sshpass-winget-manifests-$version.zip"
+
+          echo "Winget installer URL: $zipUrl"
+
+      - name: Build Chocolatey package
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $hash = "${{ steps.zip.outputs.ZIP_HASH }}"
+          $zipUrl = "${{ steps.release_url.outputs.ZIP_URL }}"
+
+          # Update nuspec version
+          $nuspecPath = "packaging/chocolatey/sshpass-win64.nuspec"
+          (Get-Content $nuspecPath) -replace '\$VERSION\$', $version | Set-Content $nuspecPath
+
+          # Update install script with actual URL and checksum
+          $installPath = "packaging/chocolatey/tools/chocolateyinstall.ps1"
+          $content = Get-Content $installPath -Raw
+          $content = $content -replace '\$CHECKSUM\$', $hash
+          # Also update URL if it has a placeholder pattern
+          $content = $content -replace 'https://github\.com/sharpninja/sshpass-win64/releases/download/v\$VERSION\$/sshpass-win64-\$VERSION\$\.zip', $zipUrl
+          $content | Set-Content $installPath
+
+          # Pack (if choco is available)
+          if (Get-Command choco -ErrorAction SilentlyContinue) {
+            Push-Location packaging/chocolatey
+            choco pack
+            Pop-Location
+            $nupkg = Get-ChildItem packaging/chocolatey/*.nupkg | Select-Object -First 1
+            if ($nupkg) {
+              Copy-Item $nupkg.FullName .
+              echo "NUPKG_NAME=$($nupkg.Name)" >> $env:GITHUB_ENV
+            }
+          } else {
+            echo "Chocolatey not available, skipping .nupkg creation"
+            Compress-Archive -Path packaging/chocolatey/* -DestinationPath "sshpass-win64-$version-chocolatey.zip"
+            echo "NUPKG_NAME=sshpass-win64-$version-chocolatey.zip" >> $env:GITHUB_ENV
+          }
+
+      # Step 4: Upload the package manifests to the existing release
+      - name: Upload package manifests to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.TAG }}
+          files: |
             sshpass-scoop-manifest.json
             sshpass-winget-manifests-${{ steps.version.outputs.VERSION }}.zip
             ${{ env.NUPKG_NAME }}
-            sha256.txt
